@@ -55,7 +55,7 @@ Output gồm:
 1. **Luôn check profile** trước khi trả lời.
 2. **Hỏi user** để bổ sung field thiếu; user **có quyền từ chối**.
 3. **Phân loại field**:
-   - **High-touch** (MBTI / Holland / Goal) → offer 2 lựa chọn: (a) qua nhóm A, (b) cung cấp inline
+   - **High-touch** (MBTI / Holland / Goal) → offer 3 path: (a) qua nhóm A, (b) cung cấp inline, (c) bỏ qua
    - **Low-touch** (education / skills / current_role / target_role / preferences) → hỏi inline
 4. Khi user từ chối / thiếu → trả lời **chỉ dựa trên info có**, **KHÔNG BỊA**.
 5. **Max 2 turn ask** /session CA → tránh spam.
