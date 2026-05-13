@@ -198,6 +198,24 @@ Sau Tavily → LLM extract structured info (title, company, location, salary, le
 - **KHÔNG** lưu `tavily_snapshot` → mỗi refine = fresh Tavily call
 - Trade-off: Tavily cost cao hơn 1 chút, nhưng đơn giản logic, luôn fresh data
 
+### Scan rule — đọc filter cũ
+
+**Thống nhất 1 query cho mọi mode** (xem [0.0-modes-and-communication.md](./0.0-modes-and-communication.md)). Manager C / Job Search KHÔNG cần biết đang ở Mode 0 hay Mode 3 — luôn filter `handled_by = 'manager_c'`:
+
+```sql
+SELECT metadata->'last_search'->'filter'
+FROM messages
+WHERE conversation_id = ?
+  AND role = 'assistant'
+  AND metadata->>'handled_by' = 'manager_c'
+  AND metadata->'last_search' IS NOT NULL
+ORDER BY created_at DESC
+LIMIT 1;
+```
+
+- **Mode 0**: filter bỏ qua turn của Manager khác đan xen → tìm đúng `last_search` gần nhất của Manager C.
+- **Mode 3 (Locked C)**: mọi assistant message đều `handled_by = manager_c` → filter trả full → query đúng tự nhiên.
+
 ```json
 // messages.metadata sau search:
 {

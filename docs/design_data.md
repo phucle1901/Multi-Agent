@@ -394,13 +394,14 @@ qdrant.upsert(collection='job_titles', point={
 | 7 · Skill Gap | `user_profile`, `jobs`, `job_skills`, `jobs_fts`, Qdrant `job_titles` | — |
 | 8 · Learning Path | `user_profile` | — |
 | 9 · Job Search | `user_profile`, `messages.metadata` (đọc previous filter), `jobs`, `companies`, `job_phuong`, `job_loai_jobs`, `loai_jobs`, `job_skills`, `jobs_fts`, Qdrant `job_titles`, **Tavily** | `messages.metadata.last_search.filter` |
-| 10-18 · TBD | (sẽ bổ sung khi discuss) | |
+| 10 · Company | **Tavily** (only) | — (stateless) |
+| 11-18 · TBD | (sẽ bổ sung khi discuss) | |
 
 ---
 
 ## VI · TODO khi discuss tiếp các agent
 
-- 10 · Company — cần Qdrant collection cho companies?
+- ~~10 · Company~~ — done (Tavily-only, không thêm schema)
 - 11 · Market Insight — aggregate jobs table?
 - 12 · Salary — aggregate salary_min/max?
 - 13 · CV Parser — bảng `user_cvs` lưu CV upload?

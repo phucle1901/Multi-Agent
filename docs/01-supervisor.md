@@ -37,13 +37,17 @@ Plus 1 fallback function `ask_back_off_topic()` cho off-topic / không thuộc s
    > "Bạn muốn (1) tìm việc cụ thể, (2) định hướng nghề, hay (3) test xem có hợp ngành nào không?"
 - Message off-topic project (vd "thời tiết hôm nay đẹp", "1+1=?") → trả response chung + redirect:
    > "Mình hỗ trợ tư vấn việc làm Hà Nội. Bạn quan tâm: định hướng nghề, tìm việc, phân tích thị trường, tối ưu CV, hay luyện phỏng vấn?"
+- **Compound question (message thuộc ≥2 group)** → pick best-fit 1 Manager + append note flag phần còn lại:
+   > "Câu của bạn có phần về [Y]. Mình xử lý phần [X] trước. Phần [Y] bạn hỏi lại sau hoặc chuyển sang nhóm Y nhé."
+  
+  Chi tiết → [0.0-modes-and-communication.md](./0.0-modes-and-communication.md). KHÔNG đa-Manager song song trong 1 turn.
 
 Chi tiết logic phân loại / threshold → handle qua prompt engineering ở pha implement, không hard-code state machine.
 
 ## State sử dụng
 
-- **Đọc**: `messages` (recent N để classify với context)
-- **Ghi**: — (Memory subsystem tự ghi)
+- **Đọc**: `messages` (recent N để classify với context). Trong Mode 0 conversation, đọc toàn bộ — không filter `handled_by` vì Supervisor là routing layer chung.
+- **Ghi**: assistant message của Supervisor (vd ask-back) gắn `metadata.handled_by = 'supervisor'`. Memory subsystem ghi `memory_facts` song song.
 
 ## Không làm
 
