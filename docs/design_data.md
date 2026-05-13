@@ -58,7 +58,7 @@ Từng message trong conversation. App backend tự ghi mỗi turn.
 | `conversation_id` | BIGINT FK conversations.id NOT NULL | |
 | `role` | ENUM('user','assistant','system') NOT NULL | |
 | `content` | TEXT NOT NULL | |
-| `metadata` | JSONB DEFAULT `'{}'` | structured info, vd `{"handled_by": "manager_c", "last_search": {"filter": {...}}}`. `handled_by` ENUM `supervisor`/`manager_a..f` — đánh dấu agent xử lý turn, để filter per-group context. `last_search.filter` cho Job Search refine — xem doc agent 9 |
+| `metadata` | JSONB DEFAULT `'{}'` | structured info, vd `{"handled_by": "manager_c", "last_search": {"filter": {...}}}`. `handled_by` ENUM `supervisor`/`manager_a..f` — **gắn cho CẢ user msg + assistant msg**, user msg + assistant msg cùng turn luôn cùng `handled_by`. **Load-bearing** cho Manager filter context (mỗi Manager X chỉ đọc message có `handled_by='manager_x'` → "ảo giác mode riêng"). Tag: Supervisor tag user msg ở Mode 0 sau classify; Backend tag trực tiếp ở Mode 1-6 tại INSERT. `last_search.filter` cho Job Search refine — xem doc agent 9. Chi tiết → [`0.0-modes-and-communication.md`](./0.0-modes-and-communication.md) |
 | `created_at` | TIMESTAMPTZ DEFAULT now() | |
 
 Index: `(conversation_id, created_at)`.

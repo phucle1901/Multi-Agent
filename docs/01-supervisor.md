@@ -46,8 +46,39 @@ Chi tiết logic phân loại / threshold → handle qua prompt engineering ở 
 
 ## State sử dụng
 
-- **Đọc**: `messages` (recent N để classify với context). Trong Mode 0 conversation, đọc toàn bộ — không filter `handled_by` vì Supervisor là routing layer chung.
-- **Ghi**: assistant message của Supervisor (vd ask-back) gắn `metadata.handled_by = 'supervisor'`. Memory subsystem ghi `memory_facts` song song.
+### Đọc context
+
+User message only + breadcrumb `handled_by` của các turn trước:
+
+```sql
+SELECT role, content, metadata->>'handled_by' AS handled_by
+FROM messages
+WHERE conversation_id = ?
+  AND role = 'user'
+ORDER BY created_at ASC
+LIMIT N
+```
+
+Render dạng:
+```
+User turn 1: "Tìm việc DA HN"          [handled_by: manager_c]
+User turn 2: "Lương DA bao nhiêu?"     [handled_by: manager_d]
+User turn 3: "Lọc thêm 20-30tr"        ← đang classify
+```
+
+→ Supervisor thấy lịch sử routing → classify message hiện tại chính xác cả khi refine xuyên Manager.
+
+KHÔNG load assistant content (nặng + thường không cần cho classify).
+
+### Ghi
+
+1. **Tag `handled_by` cho user msg N** sau khi classify:
+   - Route Manager X → `UPDATE messages SET metadata = jsonb_set(metadata, '{handled_by}', '"manager_x"') WHERE id = N`
+   - Ask-back → `UPDATE ... '"supervisor"'`
+2. **INSERT assistant message** với `handled_by = 'supervisor'` **chỉ khi ask-back**. Nếu route Manager X clean → Supervisor không sinh assistant, Manager X tự sinh.
+3. Memory subsystem ghi `memory_facts` song song (không phải việc của Supervisor).
+
+Chi tiết flow & rule → [`0.0-modes-and-communication.md`](./0.0-modes-and-communication.md).
 
 ## Không làm
 
