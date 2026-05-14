@@ -28,12 +28,40 @@ Profile mới có hiệu lực ở turn **kế tiếp**, không trong cùng turn
 ```
 1. Đọc user_profile hiện tại
 2. LLM nhận: (current profile) + (recent messages) + (user message mới)
-3. LLM output: dict các slot cần update (chỉ những slot LLM tin có thay đổi)
-   vd: {"target_role": "Data Analyst", "target_salary_max_vnd": 25000000}
+3. LLM output: dict các slot cần update (chỉ slot có context rõ ràng, không thuộc blacklist)
+   vd: {"major": "CNTT", "work_mode": "remote"}
 4. UPDATE user_profile SET ... WHERE user_id = X
 ```
 
 **Slot không nhắc → giữ nguyên.** KHÔNG reset về NULL khi LLM không thấy thông tin trong turn này.
+
+### Field Profile KHÔNG được ghi (blacklist)
+
+Các field sau Profile **KHÔNG bao giờ** ghi, kể cả khi user gõ rõ ràng:
+
+- `goal_type`, `target_role`, `target_salary_min_vnd`, `target_salary_max_vnd`, `target_date`
+- `mbti_type`, `holland_code`
+- `mbti_completed_at`, `holland_completed_at`
+
+User nói "em là INTJ" / "em muốn DA 25tr" trong chat → Profile **bỏ qua**. Signal nằm trong message text của turn đó (sub-agent đọc `recent_messages` thấy được trong cùng turn), nhưng KHÔNG persist vào `user_profile`. Memory cũng không capture các mention này — đây là scope của Goal Setting / Assessment.
+
+### Strict extraction rule — cho slot KHÔNG nằm trong blacklist
+
+Prompt phải kỹ để tránh ghi đè sai từ câu nói qua loa:
+
+**Khi nào EXTRACT (write):**
+- User declarative về bản thân: "em là sinh viên CNTT" → `major`, `employment_status`
+- User explicit decision / change: "em chuyển sang làm remote" → `work_mode`
+- User trả lời trực tiếp câu hỏi profile từ agent: Manager hỏi "lương hiện tại?" → "15tr" → `current_salary_vnd_month`
+
+**Khi nào KHÔNG extract (skip slot đó):**
+- Bình luận / đánh giá: "remote nghe sướng nhỉ" → KHÔNG ghi
+- Câu hỏi: "lương DA bao nhiêu?" → KHÔNG ghi
+- Hypothetical: "nếu em làm freelance thì sao?" → KHÔNG ghi
+- Nói về người khác: "bạn em làm IT" → KHÔNG ghi
+- Mơ hồ field hoặc value → KHÔNG ghi (thà miss còn hơn ghi sai)
+
+**Rule chung:** slot chỉ ghi khi LLM xác định **cả field name lẫn value đều rõ ràng** VÀ **user đang khẳng định về bản thân mình**. Mơ hồ một trong hai → bỏ qua slot đó.
 
 ## Schema — bảng `user_profile`
 
@@ -138,6 +166,8 @@ update_profile(user_id, slots: dict)
 | Storage | 1 bảng `user_profile`, JSON column cho arrays |
 | History | Chỉ current (1 job, 1 highest degree) |
 | Trigger | Song song với luồng chính, mỗi user input |
+| Blacklist | `goal_*`, `mbti_type`, `holland_code`, `*_completed_at` — Profile KHÔNG ghi, kể cả user nói rõ |
+| Strict extraction | Chỉ ghi khi user declarative về bản thân; bỏ qua bình luận / câu hỏi / hypothetical / mơ hồ |
 | Salary unit | VND/tháng (BIGINT) |
 | Languages format | Array of `{lang, level}` |
 | Job preferences storage | Đặt ở Profile (work_mode, company_size_pref, preferred_industries) |
