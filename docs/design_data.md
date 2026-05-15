@@ -1,50 +1,38 @@
-# Design Data — Schema toàn hệ thống
+# Design Data
 
-Bản thiết kế **toàn bộ data layer** của project: SQL schema + Qdrant collections + Static files.
-
-File này **living document** — cập nhật khi discuss thêm agent mới (D/E/F TBD).
+Schema toàn bộ data layer: **SQL (SQLite)** + **Qdrant** + **Static files** + **Pipeline offline**.
 
 ---
 
-## 0 · Stack
+## 0 · Stack & convention
 
 | Layer | Công nghệ |
 |---|---|
-| Relational | **SQLite** (FTS5 built-in) |
-| Vector | **Qdrant** |
-| Embedding | OpenAI `text-embedding-3-small` — **1536 dim**, distance **cosine** |
-| Static | JSON files trong `data/assessments/` |
+| Relational | SQLite (FTS5 built-in) |
+| Vector | Qdrant |
+| Embedding | OpenAI `text-embedding-3-small` — 1536-D, cosine |
+| Static | JSON files trong `data/` |
 
-### SQLite convention
+**Đơn vị & format**:
+- Salary: **VND INTEGER** mọi bảng (vd `60_000_000`). `triệu × 1_000_000`, USD × 26,000.
+- Date: `YYYY-MM-DD`. Datetime app-controlled: `datetime('now')` (`YYYY-MM-DD HH:MM:SS`, không TZ). Datetime crawl giữ verbatim. **Không mix format trong cùng 1 cột.**
+- JSON column: TEXT, query bằng `json_extract(col, '$.path')` (SQLite, không phải `->>`).
 
-| Khái niệm Postgres | SQLite tương đương |
-|---|---|
-| `BIGSERIAL` | `INTEGER PRIMARY KEY AUTOINCREMENT` |
-| `TIMESTAMPTZ` | `TEXT` (ISO 8601, vd `2026-05-13T10:23:00Z`) |
-| `DATE` | `TEXT` (ISO 8601, vd `2026-05-13`) — sortable as string |
-| `ENUM(...)` | `TEXT CHECK(col IN ('a','b',...))` |
-| `JSONB` | `TEXT` chứa JSON — query qua `json_extract`, `json_each` |
-| `BOOLEAN` | `INTEGER` (0/1) |
-| `tsvector + GIN` | `FTS5 virtual table` |
-
-### PRAGMA bắt buộc khi mở connection
-
+**PRAGMA mỗi connection**:
 ```sql
-PRAGMA foreign_keys = ON;       -- bật FK enforcement (mặc định tắt!)
-PRAGMA journal_mode = WAL;      -- write-ahead log, đọc-ghi đồng thời tốt hơn
-PRAGMA synchronous = NORMAL;    -- balance an toàn / tốc độ
+PRAGMA foreign_keys = ON;
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA cache_size = -64000;     -- ~64 MB
 ```
 
 ---
 
-## I · SQL Schema
+## I · SQL — User & Runtime
 
-### Nhóm 1 — User & Runtime
+> Dễ migrate; có thể drop & rebuild bất kỳ lúc nào.
 
-#### `users`
-
-Identity / authentication. Quản lý bởi app backend.
-
+### `users`
 ```sql
 CREATE TABLE users (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,19 +42,15 @@ CREATE TABLE users (
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```
+Auth fields (password_hash, oauth...) ngoài scope đồ án.
 
-Auth fields (password_hash, oauth_provider...) — ngoài scope đồ án.
-
-#### `conversations`
-
-1 user có nhiều conversation. App backend tự ghi.
-
+### `conversations`
 ```sql
 CREATE TABLE conversations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     INTEGER NOT NULL REFERENCES users(id),
-    mode        TEXT NOT NULL CHECK(mode IN 
-                ('mode_0','mode_a','mode_b','mode_c','mode_d','mode_e','mode_f')),
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    mode        TEXT NOT NULL CHECK(mode IN
+                ('mode_0','mode_1','mode_2','mode_3','mode_4','mode_5','mode_6')),
     title       TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
@@ -75,51 +59,37 @@ CREATE TABLE conversations (
 CREATE INDEX idx_conv_user_updated ON conversations(user_id, updated_at DESC);
 ```
 
-`mode` load-bearing — sidebar resume đúng mode khi user click thread cũ. Chi tiết 7 mode → [0.0-modes-and-communication.md](./0.0-modes-and-communication.md).
-
-#### `messages`
-
-Từng message trong conversation. App backend tự ghi mỗi turn.
-
+### `messages`
 ```sql
 CREATE TABLE messages (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     role            TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
     content         TEXT NOT NULL,
-    metadata        TEXT NOT NULL DEFAULT '{}',   -- JSON string
+    metadata        TEXT NOT NULL DEFAULT '{}',
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX idx_msg_conv_created ON messages(conversation_id, created_at);
-CREATE INDEX idx_msg_conv_handler_created ON messages(
-    conversation_id, 
+CREATE INDEX idx_msg_conv_created          ON messages(conversation_id, created_at);
+CREATE INDEX idx_msg_conv_handler_created  ON messages(
+    conversation_id,
     json_extract(metadata, '$.handled_by'),
     created_at DESC
 );
 ```
 
-`metadata` JSON ví dụ:
-```json
-{
-  "handled_by": "manager_c",
-  "last_search": {"filter": {...}}
-}
-```
+`metadata` JSON: `{"handled_by": "manager_c", "last_search": {"filter": {...}}}`. Expression index chỉ hit khi query dùng đúng `json_extract(metadata, '$.handled_by')`.
 
-- `handled_by` ENUM (`supervisor` / `manager_a..f`) — gắn cho cả user msg + assistant msg cùng turn. Load-bearing cho Manager context filter. Chi tiết → [0.0-modes-and-communication.md](./0.0-modes-and-communication.md).
-- `last_search.filter` cho Job Search refine — xem [09-job-search.md](./09-job-search.md).
-
-#### `user_profile`
-
-Slot-fill structured profile dài hạn. 1 row : 1 user. Ghi bởi **Agent 3 · Profile** (song song mỗi turn) — **trừ blacklist**.
+### `user_profile`
+1 row : 1 user. Ghi bởi Agent 3 · Profile — **trừ blacklist** (`goal_*`, `mbti_*`, `holland_*`, `*_completed_at`).
 
 ```sql
 CREATE TABLE user_profile (
-    user_id                     INTEGER PRIMARY KEY REFERENCES users(id),
+    user_id                     INTEGER PRIMARY KEY
+                                REFERENCES users(id) ON DELETE CASCADE,
 
     -- Education
-    highest_degree              TEXT CHECK(highest_degree IS NULL OR highest_degree IN 
+    highest_degree              TEXT CHECK(highest_degree IS NULL OR highest_degree IN
                                 ('high_school','college','university','master','phd')),
     major                       TEXT,
     school                      TEXT,
@@ -131,65 +101,54 @@ CREATE TABLE user_profile (
     current_role                TEXT,
     current_company             TEXT,
     current_salary_vnd_month    INTEGER,
-    employment_status           TEXT CHECK(employment_status IS NULL OR employment_status IN 
+    employment_status           TEXT CHECK(employment_status IS NULL OR employment_status IN
                                 ('employed','unemployed','student','freelancer')),
 
     -- Skills (JSON arrays)
-    hard_skills                 TEXT NOT NULL DEFAULT '[]',   -- ["SQL","Python","Tableau"]
+    hard_skills                 TEXT NOT NULL DEFAULT '[]',   -- ["SQL","Python"]
     soft_skills                 TEXT NOT NULL DEFAULT '[]',
     languages                   TEXT NOT NULL DEFAULT '[]',   -- [{"lang":"English","level":"B2"}]
     certificates                TEXT NOT NULL DEFAULT '[]',
 
-    -- Goal (Profile blacklist — chỉ Goal Setting set)
-    goal_type                   TEXT CHECK(goal_type IS NULL OR goal_type IN 
+    -- Goal (chỉ Agent 4 · Goal Setting set)
+    goal_type                   TEXT CHECK(goal_type IS NULL OR goal_type IN
                                 ('career_change','promotion','first_job','skill_acquisition')),
     target_role                 TEXT,
     target_salary_min_vnd       INTEGER,
     target_salary_max_vnd       INTEGER,
-    target_date                 TEXT,                          -- ISO date
-    target_location             TEXT,
+    target_date                 TEXT,
+    target_location             TEXT,                          -- Profile ĐƯỢC ghi (không blacklist)
 
-    -- Assessment (Profile blacklist — chỉ Assessment set)
-    mbti_type                   TEXT,                          -- "INTJ"
-    holland_code                TEXT,                          -- "RIA"
+    -- Assessment (chỉ Agent 5 set)
+    mbti_type                   TEXT CHECK(mbti_type IS NULL OR length(mbti_type)=4),
+    holland_code                TEXT CHECK(holland_code IS NULL OR length(holland_code)=3),
     mbti_completed_at           TEXT,
     holland_completed_at        TEXT,
 
     -- Job preferences
-    work_mode                   TEXT CHECK(work_mode IS NULL OR work_mode IN 
+    work_mode                   TEXT CHECK(work_mode IS NULL OR work_mode IN
                                 ('remote','hybrid','onsite')),
-    company_size_pref           TEXT CHECK(company_size_pref IS NULL OR company_size_pref IN 
+    company_size_pref           TEXT CHECK(company_size_pref IS NULL OR company_size_pref IN
                                 ('startup','sme','large_corp')),
-    preferred_industries        TEXT NOT NULL DEFAULT '[]',    -- ["fintech","edtech"]
+    preferred_industries        TEXT NOT NULL DEFAULT '[]',
 
-    -- Meta
     created_at                  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at                  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```
 
-Tất cả slot nullable — fill dần qua hội thoại.
-
-**Profile blacklist** (Profile KHÔNG bao giờ ghi, dù user nói rõ):
-`goal_type`, `target_role`, `target_salary_min_vnd`, `target_salary_max_vnd`, `target_date`, `mbti_type`, `holland_code`, `mbti_completed_at`, `holland_completed_at`.
-
-Backend khi user signup → INSERT row rỗng (mọi slot NULL, JSON arrays = `'[]'`).
-
-Chi tiết → [03-profile.md](./03-profile.md).
-
-#### `memory_facts`
-
-Free-form fact dài hạn về user. Ghi bởi **Agent 2 · Memory**.
+### `memory_facts`
+Free-form fact dài hạn, ghi bởi Agent 2 · Memory.
 
 ```sql
 CREATE TABLE memory_facts (
     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id                 INTEGER NOT NULL REFERENCES users(id),
-    category                TEXT NOT NULL CHECK(category IN 
+    user_id                 INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    category                TEXT NOT NULL CHECK(category IN
                             ('preference','context','emotion','interaction_meta')),
     content                 TEXT NOT NULL,
-    source_conversation_id  INTEGER REFERENCES conversations(id),
-    source_message_id       INTEGER REFERENCES messages(id),
+    source_conversation_id  INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+    source_message_id       INTEGER REFERENCES messages(id) ON DELETE SET NULL,
     created_at              TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at              TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -197,65 +156,51 @@ CREATE TABLE memory_facts (
 CREATE INDEX idx_mem_user_cat_updated ON memory_facts(user_id, category, updated_at DESC);
 ```
 
-Hard delete (không soft-delete).
-
 ---
 
-### Nhóm 2 — Jobs & Companies (offline / batch from crawl)
+## II · SQL — Jobs & Companies (CRITICAL)
 
-> **Phần CRITICAL — không sửa được sau khi import 14,833 jobs + index Qdrant.** Mọi cột `*_raw` giữ verbatim từ crawl; mọi cột parsed có thể re-derive từ raw nếu logic parsing thay đổi.
+> ⚠️ Bất biến sau khi import. Cột `*_raw` giữ verbatim; cột parsed có thể re-derive.
 
-#### `companies`
-
+### `companies`
 ```sql
 CREATE TABLE companies (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    name         TEXT UNIQUE NOT NULL,
-    size_raw     TEXT,                   -- "500-1000 nhân viên"
-    field_raw    TEXT,                   -- "Sản xuất"
-    address      TEXT,
-    -- Derived (Pipeline 0)
-    size_bucket  TEXT CHECK(size_bucket IS NULL OR size_bucket IN 
-                 ('startup','sme','large_corp'))
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT UNIQUE NOT NULL,    -- trim + collapse whitespace, giữ case
+    size_raw      TEXT,                    -- "500-1000 nhân viên" / "1000+ nhân viên"
+    field_raw     TEXT,                    -- "IT - Phần mềm" / ~41 distinct values
+    address       TEXT,                    -- display only
+    size_bucket   TEXT CHECK(size_bucket IS NULL OR size_bucket IN
+                  ('startup','sme','large_corp'))
 );
 
 CREATE INDEX idx_companies_field        ON companies(field_raw);
 CREATE INDEX idx_companies_size_bucket  ON companies(size_bucket);
 ```
 
-**Rule derive `size_bucket`** từ `size_raw` (để match `user_profile.company_size_pref`):
-- Parse số nhân viên từ size_raw (vd "500-1000" → lấy số nhỏ nhất = 500)
-- `< 50` → `startup`
-- `50–500` → `sme`
-- `> 500` → `large_corp`
-- Không parse được → NULL
+**Rule `size_bucket`** (parse lower bound từ `size_raw`): `<25` → `startup`, `25 ≤ x < 500` → `sme`, `≥500` → `large_corp`, no-number / NULL → NULL.
 
-**Normalize name** trước UNIQUE check: trim + collapse whitespace. Không lowercase (giữ Title Case "FPT Software").
-
-#### `phuongs` (master list phường/xã Hà Nội)
-
+### `phuongs`
 ```sql
 CREATE TABLE phuongs (
     id    INTEGER PRIMARY KEY AUTOINCREMENT,
-    name  TEXT UNIQUE NOT NULL          -- normalized: "phường Cầu Giấy", "xã Ba Vì"
+    name  TEXT UNIQUE NOT NULL
 );
 ```
 
-**Normalize `name`**: lowercase prefix (`phường`/`xã`), title-case phần còn lại, single-space.
-- `"phường lĩnh nam"` → `"phường Lĩnh Nam"`
-- `"xã BA VÌ"` → `"xã Ba Vì"`
+**Normalize**: trim + collapse + lowercase prefix `phường`/`xã` + title-case rest (vd `"phường lĩnh nam"` → `"phường Lĩnh Nam"`). Dataset: 124 distinct.
 
-#### `loai_jobs` (master list ngành nghề từ topcv)
-
+### `loai_jobs`
 ```sql
 CREATE TABLE loai_jobs (
     id    INTEGER PRIMARY KEY AUTOINCREMENT,
-    name  TEXT UNIQUE NOT NULL          -- "Kinh doanh / Bán hàng" (verbatim)
+    name  TEXT UNIQUE NOT NULL    -- verbatim từ topcv
 );
 ```
 
-#### `jobs` (core)
+Dataset: 22 distinct, không normalize.
 
+### `jobs` (core)
 ```sql
 CREATE TABLE jobs (
     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -263,38 +208,38 @@ CREATE TABLE jobs (
     link_job                TEXT UNIQUE NOT NULL,
     company_id              INTEGER REFERENCES companies(id),
 
-    -- Raw từ crawl (giữ verbatim) --
+    -- Raw từ crawl (verbatim)
     title                   TEXT NOT NULL,
-    location_raw            TEXT,                  -- "Hà Nội, và 2 nơi khác"
-    work_location           TEXT,                  -- multi-line address
-    work_time               TEXT,                  -- "Thứ 2 - Thứ 6..."
-    work_type               TEXT,                  -- "Toàn thời gian"/"Bán thời gian"/"Thực tập"
-    level_raw               TEXT,                  -- "Nhân viên"/"Trưởng phòng"
-    quantity                TEXT,                  -- "10 người"
+    location_raw            TEXT,
+    work_location           TEXT,
+    work_time               TEXT,
+    work_type               TEXT CHECK(work_type IS NULL OR work_type IN
+                            ('Toàn thời gian','Bán thời gian','Thực tập',
+                             'Khác','Làm tại nhà','Thời vụ')),
+    level_raw               TEXT,
+    quantity                TEXT,
     application_method      TEXT,
     job_description         TEXT,
     requirements            TEXT,
     benefits                TEXT,
-    salary_raw              TEXT,                  -- "60 - 100 triệu" / "Thoả thuận"
-    experience_raw          TEXT,                  -- "5 năm" / "Không yêu cầu"
-    deadline_raw            TEXT,                  -- "04/04/2026"
+    salary_raw              TEXT,
+    experience_raw          TEXT,
+    deadline_raw            TEXT,
 
-    -- Parsed (Pipeline 0, có thể re-derive) --
-    salary_min              INTEGER,               -- VND/tháng, NULL nếu "Thoả thuận"/USD/không parse
-    salary_max              INTEGER,
-    experience_years        REAL,                  -- 0.0 = "Không yêu cầu", NULL = không parse
-    deadline                TEXT,                  -- "YYYY-MM-DD"
-    is_in_hanoi             INTEGER NOT NULL DEFAULT 0,    -- BOOL: location_raw chứa "Hà Nội"
-    is_all_hn               INTEGER NOT NULL DEFAULT 0,    -- BOOL: xa_phuong ≥ 50 (crawl artifact, không có phường cụ thể)
+    -- Parsed (Pipeline 0)
+    salary_min              INTEGER,          -- VND/tháng
+    salary_max              INTEGER,          -- VND/tháng
+    experience_years        REAL,             -- 0.0 = "Không yêu cầu"
+    deadline                TEXT,             -- "YYYY-MM-DD"
 
-    -- Extracted (offline LLM Pipeline 1, 2) --
-    work_mode_extracted     TEXT CHECK(work_mode_extracted IS NULL OR work_mode_extracted IN 
+    -- Offline LLM extract (Pipeline 1, 2)
+    work_mode_extracted     TEXT CHECK(work_mode_extracted IS NULL OR work_mode_extracted IN
                             ('remote','hybrid','onsite','unknown')),
-    work_mode_extracted_at  TEXT,                  -- ISO timestamp, idempotent flag
-    skills_extracted_at     TEXT,                  -- idempotent flag cho Pipeline 1
+    work_mode_extracted_at  TEXT,
+    skills_extracted_at     TEXT,
 
-    -- Meta --
-    crawled_at              TEXT NOT NULL
+    crawled_at              TEXT NOT NULL,
+    imported_at             TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX idx_jobs_company           ON jobs(company_id);
@@ -303,42 +248,23 @@ CREATE INDEX idx_jobs_salary_max        ON jobs(salary_max);
 CREATE INDEX idx_jobs_deadline          ON jobs(deadline);
 CREATE INDEX idx_jobs_exp               ON jobs(experience_years);
 CREATE INDEX idx_jobs_work_mode         ON jobs(work_mode_extracted);
-CREATE INDEX idx_jobs_in_hanoi          ON jobs(is_in_hanoi);
-CREATE INDEX idx_jobs_source            ON jobs(source);
+CREATE INDEX idx_jobs_work_type         ON jobs(work_type);
 CREATE INDEX idx_jobs_skills_extracted  ON jobs(skills_extracted_at);
 CREATE INDEX idx_jobs_wm_extracted      ON jobs(work_mode_extracted_at);
 ```
 
-##### Vì sao có `is_in_hanoi` + `is_all_hn` (quan trọng — đọc kỹ)
+**Note**:
+- `level_raw` KHÔNG index filter — Job Search dùng `experience_years` làm proxy.
+- Crawl field `gender` 100% NULL → drop.
+- Idempotency Pipeline 0 = `INSERT OR IGNORE` strict skip.
+- Crawler đã filter Hà Nội từ đầu → coi mọi record là HN, không lưu cờ riêng. Mọi job có `xa_phuong` non-empty đều insert vào `job_phuong`.
 
-`xa_phuong` trong `job_details.json` là **search filter scope của crawler** (filter HN khi crawl), **không phải** vị trí thật của job.
+**Query Job Search theo phường**:
+```sql
+EXISTS (SELECT 1 FROM job_phuong WHERE job_id=jobs.id AND phuong_id=?)
+```
 
-Ví dụ trong sample: `location: "Hồ Chí Minh, và 7 nơi khác"` nhưng `xa_phuong` liệt kê 96 phường HN → đây là crawl artifact, **không** nghĩa là job ở HN.
-
-Pipeline 0 áp 3 rule:
-- `is_in_hanoi = 1` nếu `location_raw` (lowercase) chứa `"hà nội"` / `"hanoi"`. Else `= 0`.
-- `is_all_hn = 1` nếu `is_in_hanoi=1 AND len(xa_phuong) ≥ 50` — flag artifact, **KHÔNG** insert vào `job_phuong`.
-- `is_in_hanoi=1 AND len(xa_phuong) < 50` → insert M:N bình thường (phường cụ thể, đáng tin).
-- `is_in_hanoi=0` → **bỏ qua hoàn toàn** xa_phuong (search filter, không có ý nghĩa địa lý).
-
-##### Query pattern (Job Search)
-
-- **User filter phường X** (strict): chỉ jobs có ward khớp.
-  ```sql
-  ... AND EXISTS (
-      SELECT 1 FROM job_phuong 
-      WHERE job_id = jobs.id AND phuong_id = ?
-  )
-  ```
-- **User filter generic HN** (không cụ thể ward): tất cả jobs HN bao gồm `is_all_hn`.
-  ```sql
-  ... AND is_in_hanoi = 1
-  ```
-
-`is_all_hn = 1` **không lôi vào filter phường cụ thể** — tránh false positive cho jobs không rõ ward.
-
-#### `job_phuong` (M:N jobs ↔ phuongs)
-
+### `job_phuong` (M:N)
 ```sql
 CREATE TABLE job_phuong (
     job_id     INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -349,8 +275,7 @@ CREATE TABLE job_phuong (
 CREATE INDEX idx_job_phuong_phuong ON job_phuong(phuong_id);
 ```
 
-#### `job_loai_jobs` (M:N jobs ↔ loai_jobs)
-
+### `job_loai_jobs` (M:N)
 ```sql
 CREATE TABLE job_loai_jobs (
     job_id   INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -361,26 +286,24 @@ CREATE TABLE job_loai_jobs (
 CREATE INDEX idx_job_loai_loai ON job_loai_jobs(loai_id);
 ```
 
-#### `job_skills` (extract từ `requirements`, Pipeline 1)
-
+### `job_skills` (Pipeline 1)
 ```sql
 CREATE TABLE job_skills (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id      INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-    skill_name  TEXT NOT NULL,                            -- normalized: "Python", "Microsoft Excel"
+    skill_name  TEXT NOT NULL,
     category    TEXT NOT NULL CHECK(category IN ('hard','soft','tool','certificate')),
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(job_id, skill_name, category)
 );
 
 CREATE INDEX idx_job_skills_job  ON job_skills(job_id);
 CREATE INDEX idx_job_skills_name ON job_skills(skill_name);
-CREATE INDEX idx_job_skills_cat  ON job_skills(category);
 ```
 
-Logic extract + normalize → Pipeline 1. Dùng bởi **Skill Gap (Agent 7)** + rerank trong **Job Search (Agent 9)**.
+`UNIQUE` cho Pipeline 1 re-run idempotent.
 
-#### `jobs_fts` (FTS5 virtual table — BM25 title)
-
+### `jobs_fts` (FTS5)
 ```sql
 CREATE VIRTUAL TABLE jobs_fts USING fts5(
     title,
@@ -389,7 +312,6 @@ CREATE VIRTUAL TABLE jobs_fts USING fts5(
     tokenize='unicode61 remove_diacritics 2'
 );
 
--- Sync triggers
 CREATE TRIGGER jobs_ai AFTER INSERT ON jobs BEGIN
     INSERT INTO jobs_fts(rowid, title) VALUES (new.id, new.title);
 END;
@@ -404,329 +326,158 @@ CREATE TRIGGER jobs_au AFTER UPDATE OF title ON jobs BEGIN
 END;
 ```
 
-`tokenize='unicode61 remove_diacritics 2'` → bỏ dấu tiếng Việt khi index, user search `"Cau Giay"` vẫn match `"Cầu Giấy"`.
-
-**Bulk import tip**: tạo FTS sau khi INSERT 14,833 jobs xong, dùng `INSERT INTO jobs_fts(jobs_fts) VALUES('rebuild')` nhanh hơn để trigger chạy từng dòng.
-
-Dùng bởi: **Skill Gap (Agent 7)**, **Job Search (Agent 9)** — BM25 trên title.
+Scope = title only. Tokenize bỏ dấu → search `"Cau Giay"` match `"Cầu Giấy"`.
 
 ---
 
-## II · Qdrant Collections
+## III · Qdrant
 
-Cả 2 collection cùng cấu hình vector:
 ```python
 VectorParams(size=1536, distance=Distance.COSINE)
 ```
 
-**Point ID = `jobs.id`** (integer) — đồng nhất giữa 2 collection và SQL → dễ JOIN, dễ retrieve theo `job_id IN (...)`.
+**Point ID = `jobs.id`** (integer) đồng nhất SQL ↔ Qdrant. 2 collection cùng config vector.
 
-### Collection 1 · `jobs` (full-doc embedding) — đã có sẵn
+| Collection | Embedding text | Payload | Mục đích |
+|---|---|---|---|
+| `jobs` | `title \| company \| field_raw \| loai_jobs \| job_description \| requirements \| benefits` (cap 8000 tokens) | `{"job_id": int}` | Semantic full-doc — Job Search rerank |
+| `job_titles` | `"{title} \| {level_raw} \| {loai_jobs}"` | `{"job_id": int}` | Title-focused precision — Skill Gap Mode A, Job Search soft match |
 
-**Vector**: embedding của text build bởi [embedding/text_builder.py](../embedding/text_builder.py) — concat các field:
-`title | company | salary | experience | level | work_type | location | loai_job | job_description | requirements | benefits`
+KHÔNG include salary/experience/level/work_type trong embedding text (đã filter SQL). Indexed payload: `job_id` only.
 
-**Payload (per point):**
-```json
-{
-  "job_id":       123,
-  "source":       "topcv",
-  "title":        "Data Analyst",
-  "company_name": "FPT Software",
-  "salary_min":   15000000,
-  "salary_max":   25000000,
-  "is_in_hanoi":  true,
-  "work_mode":    "hybrid",
-  "deadline":     "2026-04-04"
-}
+**Pattern truy vấn**:
+```
+SQL hard-filter → list[job_id]
+  → Qdrant filter MatchAny(job_id IN ...) → top-K rank
+  → SQL re-fetch detail by id
 ```
 
-**Indexed payload (filter-able):**
-```python
-qdrant.create_payload_index(
-    collection_name="jobs",
-    field_name="job_id",
-    field_schema="integer"
-)
-```
-Chỉ index `job_id` — đủ cho pattern Job Search (SQL hard-filter trước → Qdrant filter by `job_id IN (...)` → cosine rank). Các field khác lưu payload để display nhưng không index. Nếu sau cần filter standalone, `create_payload_index` runtime.
+Payload chỉ `job_id` → SQL là single source of truth.
 
-**Mục đích**: semantic search trên toàn bộ JD (cho Job Search rerank, Q&A về job).
-
-### Collection 2 · `job_titles` (title-only embedding) — mới
-
-**Vector**: embedding của text:
-```
-title | level_raw | loai_jobs concat
-```
-
-Vd: `"Data Analyst | Nhân viên | Phân tích dữ liệu / Data Analyst, IT phần mềm"`
-
-**Payload (per point):**
-```json
-{
-  "job_id":       123,
-  "title":        "Data Analyst",
-  "level_raw":    "Nhân viên",
-  "loai_jobs":    ["Phân tích dữ liệu / Data Analyst", "IT phần mềm"],
-  "source":       "topcv",
-  "salary_min":   15000000,
-  "salary_max":   25000000,
-  "is_in_hanoi":  true,
-  "deadline":     "2026-04-04"
-}
-```
-
-**Indexed payload:**
-```python
-qdrant.create_payload_index(
-    collection_name="job_titles",
-    field_name="job_id",
-    field_schema="integer"
-)
-```
-
-**Mục đích**: semantic search role precision cao (loại nhiễu của full-doc embedding khi description dài át tín hiệu title). Dùng bởi:
-- **Skill Gap (Agent 7)** Mode A — Stage 1 retrieval
-- **Job Search (Agent 9)** — Stage 2 hybrid soft match
+**KHÔNG có collection**: `companies` (Agent 10 dùng Tavily), `occupations` (Agent 6 pure LLM), `memory_facts` (Agent 2 chốt không embed).
 
 ---
 
-## III · Static Files (JSON)
-
-Static content KHÔNG vào DB.
+## IV · Static files
 
 ```
-data/assessments/
-  mbti_questions.json          # ~60 câu hỏi MBTI
-  holland_questions.json       # ~60 câu hỏi Holland
-  mbti_interpretations.json    # 16 type → schema cố định
-  holland_interpretations.json # 6 letter → schema cố định
+data/assessments/{mbti,holland}_{questions,interpretations}.json   # Agent 5
+data/canonical_skills.json                                          # TODO — Pipeline 1 + Profile
 ```
 
-Dùng bởi **Agent 5 · Assessment**. Schema chi tiết → [05-assessment.md](./05-assessment.md).
-
-Static file khác (resume templates, cover letter templates, question bank) — sẽ note sau khi brainstorm agent 13–18.
+`canonical_skills.json` cấu trúc: `[{name, category, aliases[]}]` — dùng làm canonical list cho Pipeline 1 prompt + Profile slot-fill ([prompt-conventions.md:31-44](./prompt-conventions.md#L31-L44)).
 
 ---
 
-## IV · Parsing Rules — raw → structured (Pipeline 0)
+## V · Pipelines
 
-### `salary_raw` → `(salary_min, salary_max)` VND/tháng
+### Pipeline 0 · Bulk import (1 lần)
 
-| Pattern raw | salary_min | salary_max |
-|---|---|---|
-| `"60 - 100 triệu"` / `"60-100 triệu"` | 60_000_000 | 100_000_000 |
-| `"Trên 30 triệu"` / `"Từ 30 triệu"` | 30_000_000 | NULL |
-| `"Đến 50 triệu"` / `"Tối đa 50 triệu"` | NULL | 50_000_000 |
-| `"30 triệu"` (single value) | 30_000_000 | 30_000_000 |
-| `"Thoả thuận"` / `"Cạnh tranh"` / `"Negotiable"` | NULL | NULL |
-| `"1000 - 2000 USD"` / non-VND | NULL | NULL (giữ raw, không convert) |
-| Pattern khác | NULL | NULL |
+**Input** `data/job_details.json` (14,833 records) → **Output** SQL Nhóm 2. Kỳ vọng ~13,500-14,500 rows `jobs`.
 
-Trường hợp NULL/NULL → giữ `salary_raw` để display.
+1. Load + dedup theo `link_job` (merge `xa_phuong` ∪ `loai_job`, giữ non-null scalar).
+2. Reject record thiếu bất kỳ: `link_job`, `title`, `company_name`, `job_description`, `requirements`.
+3. Upsert `companies` (normalize name, derive `size_bucket`).
+4. Parse `salary_raw`, `experience_raw`, `deadline_raw` (section VI).
+5. `INSERT OR IGNORE INTO jobs`. **Nếu `rowcount == 0` → SKIP step 6** (không dùng `lastrowid` cũ).
+6. Insert M:N: `job_loai_jobs` cho từng `loai_job` value; `job_phuong` cho từng phường trong `xa_phuong` (normalize trước).
+7. FTS5 sync qua trigger; bulk có thể disable trigger rồi `INSERT INTO jobs_fts(jobs_fts) VALUES('rebuild')`.
 
-### `experience_raw` → `experience_years` REAL
-
-| Pattern | Output |
-|---|---|
-| `"Không yêu cầu"` / `"Không YC"` | `0.0` |
-| `"X năm"` (single) | `X.0` |
-| `"X - Y năm"` (range) | `X.0` (lấy min — yêu cầu tối thiểu) |
-| `"Trên X năm"` / `"Từ X năm"` | `X.0` |
-| `"Dưới X năm"` | `0.0` |
-| Không parse được | NULL |
-
-### `deadline_raw` → `deadline` (ISO date)
-
-- Format topcv: `DD/MM/YYYY` → `YYYY-MM-DD`
-- `"04/04/2026"` → `"2026-04-04"`
-- Invalid date (eg `"32/13/2026"`) → NULL
-
-### `location_raw` → `is_in_hanoi` BOOL
-
-- Lowercase + chứa `"hà nội"` / `"hanoi"` → `1`
-- Else → `0`
-
-### `xa_phuong` array → `job_phuong` M:N + `is_all_hn`
-
+### Pipeline 1 · Skill extract (LLM)
+Trigger `skills_extracted_at IS NULL`. Batch 5-10 jobs/call:
 ```
-if is_in_hanoi == 0:
-    skip xa_phuong (search filter artifact)
-    is_all_hn = 0
-elif len(xa_phuong) >= 50:
-    is_all_hn = 1
-    skip M:N insert
-else:
-    is_all_hn = 0
-    for each phuong in xa_phuong:
-        normalized = normalize_phuong(phuong)
-        upsert phuongs(name=normalized) → phuong_id
-        insert job_phuong(job_id, phuong_id)
+text = title + requirements + job_description
+LLM → [{skill_name (canonical), category}]
+INSERT OR IGNORE INTO job_skills    -- UNIQUE constraint dedup
+UPDATE jobs SET skills_extracted_at = datetime('now')
 ```
-
-### `loai_job` array → `job_loai_jobs` M:N
-
-Straightforward: upsert master `loai_jobs(name)` (verbatim, không normalize), insert M:N.
-
-### `company_name` + `company_size` + `company_field` → `companies`
-
-Normalize name (trim + collapse whitespace), upsert by name. Derive `size_bucket` từ `size_raw` per rule trong section I.
-
----
-
-## V · Data Pipelines (offline / batch)
-
-### Pipeline 0 · Initial bulk import (1 lần, 14,833 jobs)
-
-**Input**: `data/job_details.json`  
-**Output**: SQL tables — `companies`, `phuongs`, `loai_jobs`, `jobs`, `job_phuong`, `job_loai_jobs`, `jobs_fts` (auto via trigger hoặc rebuild sau import)
-
-Bước:
-1. Validate JSON record (có `link_job` + `title` không) — skip nếu thiếu.
-2. Upsert `companies` (normalize name), derive `size_bucket`.
-3. Parse `salary_raw`, `experience_raw`, `deadline_raw`, `location_raw` per rule section IV.
-4. Insert `jobs` (skip nếu `link_job` đã tồn tại — `UNIQUE`).
-5. Upsert `loai_jobs` master + insert `job_loai_jobs` M:N.
-6. Apply rule `xa_phuong`: nếu `is_in_hanoi=1 AND len<50` → upsert `phuongs` master (normalize) + insert `job_phuong` M:N.
-7. Sau khi xong toàn bộ: `INSERT INTO jobs_fts(jobs_fts) VALUES('rebuild');` để build FTS một lần (nhanh hơn trigger từng dòng).
-
-Idempotent qua `jobs.link_job UNIQUE`. Re-run = upsert.
-
-### Pipeline 1 · Skill extract
-
-**Trigger**: jobs có `skills_extracted_at IS NULL`
-
-```
-For each job (batch nhiều job/call để tiết kiệm):
-  text = job.requirements + "\n\n" + job.job_description
-  LLM extract → list[{skill_name, category}] (normalize theo canonical list)
-  INSERT INTO job_skills (job_id, skill_name, category)
-  UPDATE jobs SET skills_extracted_at = datetime('now') WHERE id = job.id
-```
-
-Canonical skill list ở prompt — xem [prompt-conventions.md](./prompt-conventions.md). Dùng `job_id` + `skill_name` để dedup nếu re-run (DELETE rồi INSERT theo job_id, hoặc check existence trước).
-
-**Cost estimate**: 14,800 jobs initial. Daily ~100-500 jobs mới.
 
 ### Pipeline 2 · Work mode extract
-
-**Trigger**: jobs có `work_mode_extracted_at IS NULL`
-
+Trigger `work_mode_extracted_at IS NULL`.
 ```
-PHA 1 — keyword pass:
-  text = title + job_description + benefits + work_time + work_location
-  If match ["remote","WFH","work from home","tại nhà","làm việc tại nhà"]:
-    work_mode_extracted = 'remote'
-  
-PHA 2 — LLM ambiguous (chỉ chạy khi text có ["hybrid","linh hoạt","online","từ xa"]):
-  LLM judge: hybrid mode (vị trí) hay flexible HOURS?
-  → 'hybrid' hoặc 'onsite'
-  
-Else default → 'onsite' (HN baseline)
+text = lower(title + job_description + benefits + work_time + work_location)
+REMOTE_KW    = ["remote","wfh","work from home","tại nhà","làm việc tại nhà"]
+AMBIGUOUS_KW = ["hybrid","linh hoạt","online","từ xa"]
 
-UPDATE jobs SET work_mode_extracted = ?, work_mode_extracted_at = datetime('now')
+PHA 1 (no LLM):
+  if work_type == "Làm tại nhà" or any(kw in text for kw in REMOTE_KW):  → 'remote'
+  elif any(kw in text for kw in AMBIGUOUS_KW):                           → PHA 2
+  else:                                                                  → 'onsite'
+
+PHA 2 (LLM): "JD này hybrid (vị trí mix) hay 'linh hoạt' chỉ giờ giấc?"
+  → 'hybrid' / 'onsite' / 'unknown'
 ```
 
-**Lý do 2-pha**: `"linh hoạt"` ~8.3% jobs nhưng đa số chỉ giờ giấc, không phải vị trí → tách pha LLM tiết kiệm cost.
-
-### Pipeline 3 · Embed full-doc → Qdrant `jobs`
-
-**Trigger**: jobs chưa có point trong Qdrant `jobs` (check by point_id = `jobs.id`)
-
+### Pipeline 3 + 4 · Embed → Qdrant
+Trigger: jobs chưa có point trong Qdrant collection tương ứng. Batch 200:
 ```
-For each job (batch 200):
-  text = text_builder.build_embedding_text(job_dict_from_sql)
-  vector = openai.embed(text)
-  qdrant.upsert(
-    collection="jobs",
-    point_id = job.id,
-    vector = vector,
-    payload = {job_id, source, title, company_name, salary_min, salary_max, is_in_hanoi, work_mode, deadline}
-  )
+# Pipeline 3 — collection 'jobs'
+text = build_full_doc(job, company, loai_jobs)    # format section III
+if tokens(text) > 8000: truncate
+qdrant.upsert(collection='jobs', point_id=job.id,
+              vector=embed(text), payload={"job_id": job.id})
+
+# Pipeline 4 — collection 'job_titles'
+text = f"{title} | {level_raw or ''} | {loai_str}"
+qdrant.upsert(collection='job_titles', point_id=job.id,
+              vector=embed(text), payload={"job_id": job.id})
 ```
 
-Code hiện tại trong [embedding/](../embedding/) — pipeline đang đọc từ JSON, **cần chuyển sang đọc từ SQL** sau Pipeline 0 import.
+### Pipeline 5 · Cleanup expired (cron daily)
+Xoá point Qdrant cho `jobs.deadline < date('now', '-7 days')` ở cả 2 collection. **KHÔNG** xoá SQL row (giữ history cho Manager D).
 
-### Pipeline 4 · Embed title → Qdrant `job_titles`
-
-**Trigger**: jobs chưa có point trong Qdrant `job_titles`
-
-```
-For each job (batch 200):
-  loai_str = " / ".join(SELECT name FROM loai_jobs JOIN job_loai_jobs ON ... WHERE job_id = job.id)
-  text = f"{job.title} | {job.level_raw or ''} | {loai_str}"
-  vector = openai.embed(text)
-  qdrant.upsert(
-    collection="job_titles",
-    point_id = job.id,
-    vector = vector,
-    payload = {job_id, title, level_raw, loai_jobs, source, salary_min, salary_max, is_in_hanoi, deadline}
-  )
-```
-
-### Thứ tự chạy
-
-```
-Pipeline 0 (import SQL)
-    ↓
-    ├──→ Pipeline 1 (skill extract)        — chạy parallel
-    ├──→ Pipeline 2 (work_mode extract)    — chạy parallel
-    ├──→ Pipeline 3 (embed jobs)           — chạy parallel
-    └──→ Pipeline 4 (embed job_titles)     — chạy parallel
-```
-
-Pipeline 1-4 độc lập, có thể chạy song song. Mỗi pipeline idempotent qua flag `*_extracted_at` hoặc check existence trong Qdrant.
+**Thứ tự**: Pipeline 0 (blocking) → 1, 2, 3, 4 song song. Pipeline 5 cron riêng.
 
 ---
 
-## VI · Mapping Agent → Data
+## VI · Parsing rules
+
+### Salary → VND INTEGER
+
+| Pattern | `salary_min` | `salary_max` |
+|---|---|---|
+| `"X - Y triệu"` | `X × 10⁶` | `Y × 10⁶` |
+| `"Từ X triệu"` | `X × 10⁶` | NULL |
+| `"Tới X triệu"` / `"Đến X triệu"` | NULL | `X × 10⁶` |
+| `"X triệu"` | `X × 10⁶` | `X × 10⁶` |
+| `"X - Y USD"` | `round(X × 26_000)` | `round(Y × 26_000)` |
+| `"Thoả thuận"` / `"Negotiable"` | NULL | NULL |
+| Khác | NULL | NULL |
+
+`USD_TO_VND = 26_000`. Dùng `round()` tránh float drift. NULL/NULL → giữ `salary_raw` để display.
+
+### Experience → REAL
+
+| Pattern (lower-strip) | Output |
+|---|---:|
+| `"không yêu cầu"` / `"dưới 1 năm"` | `0.0` |
+| `"1 năm"` … `"5 năm"` | `1.0` … `5.0` |
+| `"trên 5 năm"` | `5.0` |
+| Khác | NULL |
+
+### Deadline → ISO date
+`"DD/MM/YYYY"` → `"YYYY-MM-DD"`. Invalid → NULL.
+
+### `xa_phuong` → `job_phuong` M:N
+Mỗi phường trong `xa_phuong` → normalize (trim + collapse + lowercase prefix + title-case rest) → upsert `phuongs` → insert junction `job_phuong`. Không filter theo size hay location.
+
+### Company
+Normalize `name`: `re.sub(r'\s+', ' ', name.strip())` (giữ case). Upsert `companies`.
+
+---
+
+## VII · Agent → Data
 
 | Agent | Đọc | Ghi |
 |---|---|---|
-| 1 · Supervisor | `messages` (user msg + handled_by breadcrumb) | `messages.metadata.handled_by` (UPDATE user msg) |
-| 2 · Memory | `messages`, `memory_facts` | `memory_facts` |
-| 3 · Profile | `messages`, `user_profile` | `user_profile` — **trừ** `goal_*`, `mbti_*`, `holland_*`, `*_completed_at` (blacklist) |
-| 4 · Goal Setting | `user_profile` | `user_profile` (`goal_type`, `target_role`, `target_salary_min/max_vnd`, `target_date`) |
-| 5 · Assessment | static JSON, `user_profile` | `user_profile` (`mbti_type`, `holland_code`, `*_completed_at`) |
+| 1 · Supervisor | `messages` (`json_extract(metadata,'$.handled_by')`) | `messages.metadata.handled_by` (Mode 0) |
+| 2 · Memory | full `messages`, `memory_facts` | `memory_facts` |
+| 3 · Profile | full `messages`, `user_profile` | `user_profile` (trừ blacklist) |
+| 4 · Goal Setting | `user_profile` (gồm `mbti_*`/`holland_*` để personalize câu hỏi) | `goal_*` slot |
+| 5 · Assessment | static JSON, `user_profile` | `mbti_*`, `holland_*` |
 | 6 · Career Advisor | `user_profile`, `memory_facts` | — |
 | 7 · Skill Gap | `user_profile`, `jobs`, `job_skills`, `jobs_fts`, Qdrant `job_titles`, Tavily | — |
 | 8 · Learning Path | `user_profile`, Tavily | — |
-| 9 · Job Search | `user_profile`, `messages.metadata` (previous filter), `jobs`, `companies`, `phuongs`, `loai_jobs`, `job_phuong`, `job_loai_jobs`, `job_skills`, `jobs_fts`, Qdrant `jobs` + `job_titles`, Tavily | `messages.metadata.last_search.filter` |
-| 10 · Company | Tavily | — (stateless) |
-| 11–18 | TBD (D/E/F brainstorm sau) | |
-
----
-
-## VII · TODO cho phase sau
-
-- **Manager D** (11 Market Insight, 12 Salary): khả năng dùng aggregate `jobs` (GROUP BY level/role/loai_jobs) — **không cần bảng mới**, nhưng cần index trên cột aggregate. Sẽ note khi brainstorm.
-- **Manager E** (13 CV Parser, 14 Resume Builder, 15 Cover Letter): cần bảng mới `user_cvs(user_id, file_path, parsed_json, uploaded_at)` + static templates trong `data/templates/`.
-- **Manager F** (16 Question Gen, 17 Mock Interview, 18 Negotiation): static question bank JSON hay LLM live — quyết khi brainstorm.
-
----
-
-## VIII · Quyết định khoá
-
-| Vấn đề | Quyết định |
-|---|---|
-| Relational DB | SQLite (FTS5 built-in) |
-| Vector DB | Qdrant |
-| Embedding model | OpenAI `text-embedding-3-small`, 1536 dim, cosine |
-| Date/time storage | ISO 8601 TEXT |
-| JSON arrays | TEXT chứa JSON, query qua `json_extract` |
-| ENUM | TEXT + CHECK (trừ `jobs.source` — bỏ CHECK để dễ thêm crawler) |
-| Multi-user | Mọi bảng user-scoped FK → `users.id` |
-| Bảng cache | KHÔNG — tính được live thì tính live |
-| Persist output stateless agent | KHÔNG (Mock Interview, Learning Path, Negotiation) |
-| Static content | JSON files trong `data/` |
-| Qdrant scope | 2 collection (`jobs`, `job_titles`), point_id = `jobs.id` |
-| Qdrant indexed payload | Chỉ `job_id` (filter pattern qua SQL → Qdrant `job_id IN ...`) |
-| `conversations.mode` | Bắt buộc — UX sidebar resume |
-| `messages.metadata.handled_by` | JSON, indexed expression `(conv_id, handled_by, created_at)` |
-| `is_in_hanoi` + `is_all_hn` | Bắt buộc — xử lý crawl artifact `xa_phuong` |
-| FTS5 scope | Title only, tokenize `unicode61 remove_diacritics 2` |
-| `companies.size_bucket` | Derived (startup/sme/large_corp) cho filter user prefs |
-| `jobs.source` | DEFAULT `'topcv'`, không CHECK constraint |
-| Profile blacklist | `goal_*`, `mbti_*`, `holland_*`, `*_completed_at` |
-| PRAGMA bật mỗi connection | `foreign_keys=ON`, `journal_mode=WAL`, `synchronous=NORMAL` |
+| 9 · Job Search | `user_profile`, `messages.metadata`, `jobs`, `companies`, `phuongs`, `loai_jobs`, M:N tables, `job_skills`, `jobs_fts`, Qdrant 2 collection, Tavily | `messages.metadata.last_search.filter` |
+| 10 · Company | Tavily | — |
+| 11-18 | TBD (Manager D/E/F) | — |
