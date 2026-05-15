@@ -39,14 +39,12 @@ Hệ quả của parallel:
 4. Execute trên DB
 ```
 
-## 4 category của fact
+## 2 category của fact
 
 | Category | Ý nghĩa | Ví dụ content |
 |---|---|---|
 | `preference` | Sở thích / xu hướng cá nhân **dài hạn** KHÔNG khớp slot Profile | "ngại commute xa", "không thích corporate culture", "muốn mentor tốt", "ưu tiên lương hơn WLB" |
-| `context` | Hoàn cảnh / tình huống **hiện tại** đang chi phối user (có thời hạn) | "đang chuẩn bị phỏng vấn FPT ngày 25/5", "vừa nghỉ MoMo tháng trước", "đang học SQL tuần 3 Coursera" |
-| `emotion` | Cảm xúc / trạng thái tâm lý — ảnh hưởng tông giọng của agent khi response | "lo lắng về deadline tốt nghiệp", "mất tự tin sau phỏng vấn fail", "hưng phấn với data eng" |
-| `interaction_meta` | Cách user muốn agent giao tiếp (format / style) | "thích câu trả lời ngắn", "muốn hiển thị dạng bảng", "không thích bị hỏi nhiều câu cùng lúc" |
+| `style` | Cách user muốn agent giao tiếp (format / style) | "thích câu trả lời ngắn", "muốn hiển thị dạng bảng", "không thích bị hỏi nhiều câu cùng lúc" |
 
 ## Schema — bảng `memory_facts`
 
@@ -54,7 +52,7 @@ Hệ quả của parallel:
 |---|---|---|
 | `id` | BIGSERIAL PK | |
 | `user_id` | BIGINT FK users.id NOT NULL | |
-| `category` | ENUM('preference','context','emotion','interaction_meta') NOT NULL | agent filter theo cái này |
+| `category` | ENUM('preference','style') NOT NULL | agent filter theo cái này |
 | `content` | TEXT NOT NULL | 1 câu tự nhiên, ngắn (≤ ~200 char) |
 | `source_conversation_id` | BIGINT FK conversations.id NULL | debug / audit only |
 | `source_message_id` | BIGINT FK messages.id NULL | debug / audit only |
@@ -118,7 +116,7 @@ Cùng 1 turn có thể vừa update Profile vừa thêm Memory fact — 2 agent 
 |---|---|
 | Conversations + messages | App backend tự ghi, KHÔNG qua agent |
 | Trigger | Song song với luồng chính, mỗi user input |
-| Fact category | 4 enum: preference, context, emotion, interaction_meta |
+| Fact category | 2 enum: preference, style |
 | Update conflict | Overwrite — LLM tự decide insert/update/delete khi extract |
 | Delete style | Hard delete (không soft-delete) |
 | Traceability | Lưu `source_conversation_id` + `source_message_id` |

@@ -145,7 +145,7 @@ CREATE TABLE memory_facts (
     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id                 INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     category                TEXT NOT NULL CHECK(category IN
-                            ('preference','context','emotion','interaction_meta')),
+                            ('preference','style')),
     content                 TEXT NOT NULL,
     source_conversation_id  INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
     source_message_id       INTEGER REFERENCES messages(id) ON DELETE SET NULL,

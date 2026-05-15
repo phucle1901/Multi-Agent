@@ -144,9 +144,7 @@ update_profile(user_id, slots: dict)
 | Học vấn / kinh nghiệm / skill list / goal / MBTI / Holland | **Profile** | Structured, query bằng SQL |
 | Job preference structured (work_mode, size, industry) | **Profile** | Filter job dùng SQL |
 | Preference mềm / qualitative không có slot tương ứng | **Memory** `preference` | "ngại commute", "muốn mentor tốt" |
-| Hoàn cảnh hiện tại / event tạm | **Memory** `context` | có thời hạn ngắn |
-| Cảm xúc / tâm lý | **Memory** `emotion` | ảnh hưởng tông response |
-| Cách user muốn agent trả lời | **Memory** `interaction_meta` | format/style |
+| Cách user muốn agent trả lời | **Memory** `style` | format/style |
 
 **Nguyên tắc**: lookup được bằng **SQL filter** → Profile. Chỉ dùng để **LLM personalize prompt** → Memory.
 
