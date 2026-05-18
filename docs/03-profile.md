@@ -65,49 +65,9 @@ Prompt phải kỹ để tránh ghi đè sai từ câu nói qua loa:
 
 ## Schema — bảng `user_profile`
 
-1 row : 1 user (1:1 với bảng `users`).
+Xem [design_data.md#user_profile](./design_data.md#user_profile).
 
-| Column | Type | Note |
-|---|---|---|
-| `user_id` | BIGINT **PK** FK users.id | |
-| **— Education —** | | |
-| `highest_degree` | ENUM('high_school','college','university','master','phd') | nullable |
-| `major` | TEXT | nullable |
-| `school` | TEXT | nullable |
-| `graduation_year` | INT | nullable |
-| `gpa` | NUMERIC(3,2) | nullable |
-| **— Experience (current only) —** | | |
-| `years_experience` | INT | nullable |
-| `current_role` | TEXT | nullable |
-| `current_company` | TEXT | nullable |
-| `current_salary_vnd_month` | BIGINT | VND/tháng |
-| `employment_status` | ENUM('employed','unemployed','student','freelancer') | nullable |
-| **— Skills (JSON arrays) —** | | |
-| `hard_skills` | JSONB DEFAULT `'[]'` | `["SQL","Python","Tableau"]` |
-| `soft_skills` | JSONB DEFAULT `'[]'` | `["communication","leadership"]` |
-| `languages` | JSONB DEFAULT `'[]'` | `[{"lang":"English","level":"B2/IELTS 6.5"},{"lang":"Japanese","level":"N3"}]` |
-| `certificates` | JSONB DEFAULT `'[]'` | `["AWS SAA","PMP"]` |
-| **— Goal —** | | |
-| `goal_type` | ENUM('career_change','promotion','first_job','skill_acquisition') | nullable |
-| `target_role` | TEXT | "Data Analyst" |
-| `target_salary_min_vnd` | BIGINT | VND/tháng |
-| `target_salary_max_vnd` | BIGINT | VND/tháng |
-| `target_date` | DATE | deadline đạt được goal |
-| `target_location` | TEXT | "Cầu Giấy" / "Hà Nội" / "remote" |
-| **— Assessment —** | | |
-| `mbti_type` | CHAR(4) | "INTJ" |
-| `holland_code` | CHAR(3) | "RIA" |
-| `mbti_completed_at` | TIMESTAMPTZ | khi user xong MBTI |
-| `holland_completed_at` | TIMESTAMPTZ | khi user xong Holland |
-| **— Job preferences —** | | |
-| `work_mode` | ENUM('remote','hybrid','onsite') | nullable |
-| `company_size_pref` | ENUM('startup','sme','large_corp') | nullable |
-| `preferred_industries` | JSONB DEFAULT `'[]'` | `["fintech","edtech"]` |
-| **— Meta —** | | |
-| `created_at` | TIMESTAMPTZ DEFAULT now() | |
-| `updated_at` | TIMESTAMPTZ DEFAULT now() | |
-
-**Tất cả slot nullable** — Profile fill dần qua hội thoại, không bắt buộc đầy đủ.
+Tất cả slot nullable — Profile fill dần qua hội thoại, không bắt buộc đầy đủ.
 
 ## Read API cho agent khác
 

@@ -81,61 +81,39 @@ CREATE INDEX idx_msg_conv_handler_created  ON messages(
 `metadata` JSON: `{"handled_by": "manager_c", "last_search": {"filter": {...}}}`. Expression index chỉ hit khi query dùng đúng `json_extract(metadata, '$.handled_by')`.
 
 ### `user_profile`
-1 row : 1 user. Ghi bởi Agent 3 · Profile — **trừ blacklist** (`goal_*`, `mbti_*`, `holland_*`, `*_completed_at`).
+1 row : 1 user. Nguồn ghi:
+- **CV extract + User form**: `current_role`, `years_experience`, `skills`
+- **Agent 4 · Goal Setting + User form**: `goal_type`, `target_role`, `target_salary_*`
+- **Agent 5 · Assessment** (read-only với user): `mbti_type`, `holland_code`
 
 ```sql
 CREATE TABLE user_profile (
-    user_id                     INTEGER PRIMARY KEY
-                                REFERENCES users(id) ON DELETE CASCADE,
+    user_id                INTEGER PRIMARY KEY
+                           REFERENCES users(id) ON DELETE CASCADE,
 
-    -- Education
-    highest_degree              TEXT CHECK(highest_degree IS NULL OR highest_degree IN
-                                ('high_school','college','university','master','phd')),
-    major                       TEXT,
-    school                      TEXT,
-    graduation_year             INTEGER,
-    gpa                         REAL,
+    -- Current snapshot
+    current_role           TEXT,
+    years_experience       INTEGER,
+    skills                 TEXT NOT NULL DEFAULT '[]',   -- JSON: ["Python","C++","SQL"]
 
-    -- Experience (current only)
-    years_experience            INTEGER,
-    current_role                TEXT,
-    current_company             TEXT,
-    current_salary_vnd_month    INTEGER,
-    employment_status           TEXT CHECK(employment_status IS NULL OR employment_status IN
-                                ('employed','unemployed','student','freelancer')),
+    -- Goal
+    goal_type              TEXT CHECK(goal_type IS NULL OR goal_type IN
+                           ('career_change','promotion','first_job',
+                            'skill_acquisition','salary_increase','exploring')),
+    target_role            TEXT,
+    target_salary_min_vnd  INTEGER,
+    target_salary_max_vnd  INTEGER,
 
-    -- Skills (JSON arrays)
-    hard_skills                 TEXT NOT NULL DEFAULT '[]',   -- ["SQL","Python"]
-    soft_skills                 TEXT NOT NULL DEFAULT '[]',
-    languages                   TEXT NOT NULL DEFAULT '[]',   -- [{"lang":"English","level":"B2"}]
-    certificates                TEXT NOT NULL DEFAULT '[]',
+    -- Assessment results
+    mbti_type              TEXT CHECK(mbti_type IS NULL OR length(mbti_type)=4),
+    holland_code           TEXT CHECK(holland_code IS NULL OR length(holland_code)=3),
 
-    -- Goal (chỉ Agent 4 · Goal Setting set)
-    goal_type                   TEXT CHECK(goal_type IS NULL OR goal_type IN
-                                ('career_change','promotion','first_job','skill_acquisition')),
-    target_role                 TEXT,
-    target_salary_min_vnd       INTEGER,
-    target_salary_max_vnd       INTEGER,
-    target_date                 TEXT,
-    target_location             TEXT,                          -- Profile ĐƯỢC ghi (không blacklist)
-
-    -- Assessment (chỉ Agent 5 set)
-    mbti_type                   TEXT CHECK(mbti_type IS NULL OR length(mbti_type)=4),
-    holland_code                TEXT CHECK(holland_code IS NULL OR length(holland_code)=3),
-    mbti_completed_at           TEXT,
-    holland_completed_at        TEXT,
-
-    -- Job preferences
-    work_mode                   TEXT CHECK(work_mode IS NULL OR work_mode IN
-                                ('remote','hybrid','onsite')),
-    company_size_pref           TEXT CHECK(company_size_pref IS NULL OR company_size_pref IN
-                                ('startup','sme','large_corp')),
-    preferred_industries        TEXT NOT NULL DEFAULT '[]',
-
-    created_at                  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at                  TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at             TEXT NOT NULL DEFAULT (datetime('now'))
 );
 ```
+
+`skills` là JSON array of string thô (không category, không level). Agent compare bằng string match / LLM. Filter location / work_mode / industry / salary cho Job Search → extract từ `user_message` mỗi turn ([09-job-search.md](./09-job-search.md)).
 
 ### `memory_facts`
 Free-form fact dài hạn, ghi bởi Agent 2 · Memory.
@@ -365,7 +343,7 @@ data/assessments/{mbti,holland}_{questions,interpretations}.json   # Agent 5
 data/canonical_skills.json                                          # TODO — Pipeline 1 + Profile
 ```
 
-`canonical_skills.json` cấu trúc: `[{name, category, aliases[]}]` — dùng làm canonical list cho Pipeline 1 prompt + Profile slot-fill ([prompt-conventions.md:31-44](./prompt-conventions.md#L31-L44)).
+`canonical_skills.json` cấu trúc: `[{name, category, aliases[]}]` — dùng làm canonical list cho Pipeline 1 prompt + Profile CV extract ([prompt-conventions.md:31-44](./prompt-conventions.md#L31-L44)).
 
 ---
 
@@ -472,9 +450,9 @@ Normalize `name`: `re.sub(r'\s+', ' ', name.strip())` (giữ case). Upsert `comp
 |---|---|---|
 | 1 · Supervisor | `messages` (`json_extract(metadata,'$.handled_by')`) | `messages.metadata.handled_by` (Mode 0) |
 | 2 · Memory | full `messages`, `memory_facts` | `memory_facts` |
-| 3 · Profile | full `messages`, `user_profile` | `user_profile` (trừ blacklist) |
-| 4 · Goal Setting | `user_profile` (gồm `mbti_*`/`holland_*` để personalize câu hỏi) | `goal_*` slot |
-| 5 · Assessment | static JSON, `user_profile` | `mbti_*`, `holland_*` |
+| 3 · Profile | CV file (PDF/text), `user_profile` | `user_profile` (`current_role`, `years_experience`, `skills`) |
+| 4 · Goal Setting | `user_profile` (gồm `mbti_type`/`holland_code` để personalize câu hỏi) | `goal_type`, `target_role`, `target_salary_min_vnd`, `target_salary_max_vnd` |
+| 5 · Assessment | static JSON, `user_profile` | `mbti_type`, `holland_code` |
 | 6 · Career Advisor | `user_profile`, `memory_facts` | — |
 | 7 · Skill Gap | `user_profile`, `jobs`, `job_skills`, `jobs_fts`, Qdrant `job_titles`, Tavily | — |
 | 8 · Learning Path | `user_profile`, Tavily | — |

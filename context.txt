@@ -1,0 +1,122 @@
+============================================================
+ CONTEXT HANDOFF — Multi-Agent Data Layer Build
+ (paste toàn bộ file này vào prompt mới khi đổi máy)
+============================================================
+
+## Việc đang làm
+
+Build data layer cho đồ án Multi-Agent chatbot tư vấn nghề nghiệp Hà Nội.
+Đọc file data/job_details.json (14,833 jobs HN từ topcv) → đẩy vào:
+  - SQLite (jobs + companies + phuongs + loai_jobs + M:N + FTS5 title)
+  - Qdrant Cloud 2 collection: `jobs` (full-doc), `job_titles` (title only)
+
+Phạm vi chốt: chỉ Pipeline 0 + 3 + 4. Bỏ:
+  - Pipeline 1 (skill extract) — block do canonical_skills.json chưa có
+  - Pipeline 2 (work_mode extract) — làm task sau
+
+Refs đã đọc: docs/design_data.md (schema spec), docs/09-job-search.md, docs/07-skill-gap.md.
+
+
+## Stack đã chốt
+
+- SQLite (built-in FTS5)
+- Qdrant Cloud — env vars: QDRANT_URL, QDRANT_API_KEY
+- Embedding: BAAI/bge-m3 chạy LOCAL qua transformers (KHÔNG dùng sentence-transformers, KHÔNG dùng LangChain wrapper)
+    from transformers import AutoTokenizer, AutoModel
+    tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-m3")
+    model = AutoModel.from_pretrained("BAAI/bge-m3")
+  Lấy vector dense = CLS token (output[0][:, 0]) + L2 normalize
+  Vector size: 1024 (KHÔNG phải 1536 như spec gốc — đổi do dùng bge-m3)
+- Cross-platform: pathlib, không hardcode path, auto-detect device (cuda > mps > cpu)
+- Conda env: tên thay đổi theo máy
+    * Mac: "thesis" (CLAUDE.md ghi)
+    * Windows hiện tại: "code"
+
+
+## Cấu trúc folder target: Multi-Agent/data/index_data/
+
+  __init__.py                    [DONE — file rỗng]
+  config.py                      [DONE — test PASS]
+  schema.sql                     [DONE — test PASS]
+  db.py                          [DONE — test PASS, đã tạo data/app.db với 17 bảng + 3 trigger]
+  parsers.py                     [DONE — test PASS]
+  pipeline_0_import.py           [CODE GỬI XONG — chưa confirm chạy import 14k jobs OK]
+  qdrant_setup.py                [TODO — Step 4 tiếp theo]
+  pipeline_3_embed_jobs.py       [TODO — Step 5]
+  pipeline_4_embed_titles.py     [TODO — Step 6]
+  run_all.py                     [TODO — Step 7, orchestrator]
+
+
+## Decisions chốt khác
+
+- Cột để NULL ở P0 (Pipeline 1/2 fill sau):
+    jobs.work_mode_extracted, jobs.work_mode_extracted_at,
+    jobs.skills_extracted_at, bảng job_skills (empty)
+- User-side tables (users/conversations/messages/user_profile/memory_facts):
+  tạo schema rỗng (app sau dùng được liền, không cần migration)
+- Idempotency P0: INSERT OR IGNORE strict, rowcount==0 thì skip junction
+- Idempotency P3/P4: query Qdrant scroll lấy existing point IDs, skip jobs đã embed
+- Qdrant collection: check-then-create (KHÔNG recreate, tránh xoá data cũ)
+- Point ID Qdrant = jobs.id (integer)
+- Payload Qdrant = {"job_id": int} only (per spec — KHÔNG dùng langchain-qdrant vì nó bọc thành {page_content, metadata})
+- FTS5 sync qua trigger + final rebuild('jobs_fts')
+- Dedup: theo link_job, union xa_phuong + loai_job, giữ scalar non-null đầu tiên
+- Reject record thiếu 1 trong: link_job, title, company_name, job_description, requirements
+
+
+## Hành vi quan trọng (user feedback)
+
+  KHÔNG TỰ EDIT CODE FILE CỦA USER. Chỉ gửi code trong chat, user tự copy.
+  Viết tiếng Việt đơn giản, ít thuật ngữ.
+  Code ngắn gọn — không over-engineer. Tham khảo CLAUDE.md ở root.
+  Ask 1 question tại 1 thời điểm trong design Q&A (không batch).
+
+
+## Tình trạng test đã verify
+
+✓ python -m data.index_data.config            (in path + device + env status)
+✓ python -m data.index_data.db                (tạo data/app.db, in 17 bảng)
+✓ python -m data.index_data.parsers           ("Tất cả test PASS")
+✓ python -c "import sqlite3; sqlite3.connect(':memory:').executescript(open(r'data/index_data/schema.sql', encoding='utf-8').read()); print('schema OK')"
+? python -m data.index_data.pipeline_0_import (chưa confirm)
+
+
+## Lưu ý môi trường
+
+- Windows hiện tại có GPU GTX 1660 (6GB), driver 560.94.
+- Torch ban đầu cài bản CPU-only — đã hướng dẫn cài lại bản CUDA:
+    pip install torch --index-url https://download.pytorch.org/whl/cu126
+- Trên Mac sẽ dùng MPS (Apple Silicon).
+- File context.txt này nằm ở Multi-Agent/context.txt.
+
+
+## Việc tiếp theo (theo thứ tự)
+
+  1. Confirm pipeline_0_import.py chạy ra ~14k jobs OK.
+  2. Step 4: qdrant_setup.py — connect Qdrant Cloud, tạo 2 collection (size 1024, cosine).
+  3. Step 5: pipeline_3_embed_jobs.py — embed text full (title|company|field|loai|JD|req|benefits) → collection 'jobs'.
+  4. Step 6: pipeline_4_embed_titles.py — embed text ngắn (title|level|loai) → collection 'job_titles'.
+  5. Step 7: run_all.py — orchestrator chạy tuần tự + in tổng kết.
+
+
+============================================================
+ PROMPT GỬI LẠI Ở MÁY MỚI:
+============================================================
+
+Tôi đang build data layer cho đồ án Multi-Agent chatbot tư vấn nghề nghiệp Hà Nội.
+Working dir: <path>/Multi-Agent (đổi path theo máy mới)
+
+Đọc file Multi-Agent/context.txt để hiểu trạng thái hiện tại, các quyết định
+đã chốt, và việc tiếp theo cần làm. Tuân thủ các quy tắc hành vi trong đó
+(không tự edit code file của tôi, gửi code chat để tôi copy, viết tiếng Việt
+đơn giản, code ngắn gọn).
+
+Cũng đọc:
+  - Multi-Agent/CLAUDE.md (behavioral guidelines)
+  - Multi-Agent/docs/design_data.md (schema spec đầy đủ)
+
+Hiện tại tôi đã làm xong Step 1, 2 và đang ở Step 3 (đã có code, chưa confirm chạy).
+Việc tiếp theo theo context.txt. Bắt đầu bằng việc hỏi tôi đã chạy pipeline_0_import
+chưa, kết quả thế nào, rồi tiếp Step 4.
+
+============================================================
